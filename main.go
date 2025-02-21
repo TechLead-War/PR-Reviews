@@ -3,175 +3,175 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"html/template"
-	"io"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
+
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 )
 
-const (
-	owner = "julofinance"
-	repo  = "whatsapp-service"
-)
+type GitHubUser struct {
+	Login string `json:"login"`
+}
 
-func getToken() string {
-	fmt.Println(os.Getenv("GITHUB_TOKEN"))
-	return os.Getenv("GITHUB_TOKEN")
+type GitHubPR struct {
+	ID      int        `json:"id"`
+	Number  int        `json:"number"`
+	Title   string     `json:"title"`
+	State   string     `json:"state"`
+	HTMLURL string     `json:"html_url"`
+	User    GitHubUser `json:"user"`
 }
 
 type PullRequest struct {
+	ID     int    `json:"id"`
 	Number int    `json:"number"`
 	Title  string `json:"title"`
-	User   struct {
-		Login string `json:"login"`
-	} `json:"user"`
-	CreatedAt string `json:"created_at"`
-	Body      string `json:"body"`
+	Author string `json:"author"`
+	State  string `json:"state"`
+	PRURL  string `json:"pr_url"`
 }
 
-func fetchPullRequests() ([]PullRequest, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "GoReviewDashboard")
-	if token := getToken(); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
+type GitHubComment struct {
+	ID        int        `json:"id"`
+	Body      string     `json:"body"`
+	CreatedAt string     `json:"created_at"`
+	UpdatedAt string     `json:"updated_at"`
+	HTMLURL   string     `json:"html_url"`
+	User      GitHubUser `json:"user"`
+}
 
+type Comment struct {
+	ID         int    `json:"id"`
+	Author     string `json:"author"`
+	Body       string `json:"body"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+	CommentURL string `json:"comment_url"`
+}
+
+func enableCors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
-	}(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API error: %s", body)
-	}
-	var prs []PullRequest
-	if err := json.NewDecoder(resp.Body).Decode(&prs); err != nil {
-		return nil, err
-	}
-	return prs, nil
+		next.ServeHTTP(w, r)
+	})
 }
 
-func fetchPullRequest(number int) (*PullRequest, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, number)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "GoReviewDashboard")
-	if token := getToken(); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-
+func getPullsHandler(githubToken string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		owner, repo := r.URL.Query().Get("owner"), r.URL.Query().Get("repo")
+		if owner == "" || repo == "" {
+			http.Error(w, `{"message": "Owner and Repository are required!"}`, http.StatusBadRequest)
+			return
 		}
-	}(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API error: %s", body)
-	}
-	var pr PullRequest
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return nil, err
-	}
-	return &pr, nil
-}
+		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
 
-var indexTmpl = `
-<!DOCTYPE html>
-<html>
-<head>
-	<title>Review Dashboard</title>
-</head>
-<body>
-	<h1>Pull Requests for Review</h1>
-	<ul>
-	{{ range . }}
-		<li>
-			<strong>{{ .User.Login }}</strong> - {{ .Title }} at {{ .CreatedAt }}
-			<a href="/review/{{ .Number }}">Review</a>
-		</li>
-	{{ end }}
-	</ul>
-</body>
-</html>
-`
+		var prs []GitHubPR
+		if err = json.NewDecoder(resp.Body).Decode(&prs); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(prs) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "No open PRs found for this repository."})
+			return
+		}
 
-var reviewTmpl = `
-<!DOCTYPE html>
-<html>
-<head>
-	<title>Review PR #{{ .Number }}</title>
-</head>
-<body>
-	<h1>{{ .Title }}</h1>
-	<p>By: <strong>{{ .User.Login }}</strong></p>
-	<p>Created at: {{ .CreatedAt }}</p>
-	<p>{{ .Body }}</p>
-	<a href="/">Back</a>
-</body>
-</html>
-`
-
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	prs, err := fetchPullRequests()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	tmpl, err := template.New("index").Parse(indexTmpl)
-	if err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-		return
-	}
-	err = tmpl.Execute(w, prs)
-	if err != nil {
-		return
+		var results []PullRequest
+		for _, pr := range prs {
+			results = append(results, PullRequest{
+				ID:     pr.ID,
+				Number: pr.Number,
+				Title:  pr.Title,
+				Author: pr.User.Login,
+				State:  pr.State,
+				PRURL:  pr.HTMLURL,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	}
 }
 
-func reviewHandler(w http.ResponseWriter, r *http.Request) {
-	numberStr := r.URL.Path[len("/review/"):]
-	number, err := strconv.Atoi(numberStr)
-	if err != nil {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	pr, err := fetchPullRequest(number)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	tmpl, err := template.New("review").Parse(reviewTmpl)
-	if err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-		return
-	}
-	err := tmpl.Execute(w, pr)
-	if err != nil {
-		return
+func getCommentsHandler(githubToken string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		prNumber := vars["prNumber"]
+		owner, repo := r.URL.Query().Get("owner"), r.URL.Query().Get("repo")
+		if owner == "" || repo == "" {
+			http.Error(w, `{"message": "Owner and Repository are required!"}`, http.StatusBadRequest)
+			return
+		}
+		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s/comments", owner, repo, prNumber)
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		var ghComments []GitHubComment
+		if err = json.NewDecoder(resp.Body).Decode(&ghComments); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		var results []Comment
+		for _, c := range ghComments {
+			results = append(results, Comment{
+				ID:         c.ID,
+				Author:     c.User.Login,
+				Body:       c.Body,
+				CreatedAt:  c.CreatedAt,
+				UpdatedAt:  c.UpdatedAt,
+				CommentURL: c.HTMLURL,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	}
 }
 
 func main() {
-	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/review/", reviewHandler)
-	fmt.Println("Server running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	godotenv.Load()
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "5000"
+	}
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	if githubToken == "" {
+		log.Fatal("GITHUB_TOKEN is required")
+	}
+
+	r := mux.NewRouter()
+	r.Use(enableCors)
+
+	// API endpoints
+	r.HandleFunc("/api/pulls", getPullsHandler(githubToken)).Methods("GET")
+	r.HandleFunc("/api/pulls/{prNumber}/comments", getCommentsHandler(githubToken)).Methods("GET")
+
+	// Serve FE.html for all other routes
+	r.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "FE.html")
+	})
+
+	log.Printf("Server running on port %s", port)
+	log.Fatal(http.ListenAndServe(":"+port, r))
 }

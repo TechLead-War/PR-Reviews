@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>GitHub PR Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+            'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            background: #f7f7f7;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 20px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            border-radius: 4px;
+        }
+        input, button {
+            padding: 10px;
+            font-size: 16px;
+            margin: 5px 0;
+        }
+        .pull-request, .comment {
+            border-bottom: 1px solid #ddd;
+            padding: 10px 0;
+        }
+        .pull-request:last-child, .comment:last-child {
+            border-bottom: none;
+        }
+        .comments {
+            margin-left: 20px;
+            background: #fafafa;
+            padding: 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>GitHub Pull Requests</h1>
+    <form id="prForm">
+        <input type="text" id="owner" placeholder="Owner" required value="julofinance">
+        <input type="text" id="repo" placeholder="Repository" required>
+        <button type="submit">Fetch PRs</button>
+    </form>
+    <div id="result"></div>
+</div>
+<script>
+    document.getElementById("prForm").addEventListener("submit", function(e) {
+        e.preventDefault();
+        const owner = document.getElementById("owner").value.trim();
+        const repo = document.getElementById("repo").value.trim();
+        if (!owner || !repo) return alert("Both fields are required.");
+
+        fetch(`/api/pulls?owner=${owner}&repo=${repo}`)
+            .then(response => response.json())
+            .then(data => {
+                const resultDiv = document.getElementById("result");
+                resultDiv.innerHTML = "";
+                if (data.message) {
+                    resultDiv.innerHTML = `<p>${data.message}</p>`;
+                } else {
+                    data.forEach(pr => {
+                        const prDiv = document.createElement("div");
+                        prDiv.className = "pull-request";
+                        prDiv.innerHTML = `
+              <h3>#${pr.number}: ${pr.title}</h3>
+              <p>Author: ${pr.author} | State: ${pr.state}</p>
+              <a href="${pr.pr_url}" target="_blank">View PR</a>
+              <br>
+              <button class="commentsBtn" data-pr="${pr.number}">Show Comments</button>
+              <div class="comments" id="comments-${pr.number}"></div>
+            `;
+                        resultDiv.appendChild(prDiv);
+                    });
+                    // add listeners for comments buttons
+                    document.querySelectorAll(".commentsBtn").forEach(btn => {
+                        btn.addEventListener("click", function() {
+                            const prNumber = this.getAttribute("data-pr");
+                            const commentsDiv = document.getElementById("comments-" + prNumber);
+                            // Toggle display if already loaded
+                            if (commentsDiv.innerHTML) {
+                                commentsDiv.innerHTML = "";
+                                return;
+                            }
+                            fetch(`/api/pulls/${prNumber}/comments?owner=${owner}&repo=${repo}`)
+                                .then(resp => resp.json())
+                                .then(comments => {
+                                    if (comments.message) {
+                                        commentsDiv.innerHTML = `<p>${comments.message}</p>`;
+                                    } else {
+                                        commentsDiv.innerHTML = comments.map(comment => `
+                      <div class="comment">
+                        <p><strong>${comment.author}</strong> commented:</p>
+                        <p>${comment.body}</p>
+                      </div>
+                    `).join("");
+                                    }
+                                })
+                                .catch(err => {
+                                    console.error(err);
+                                    alert("Error fetching comments.");
+                                });
+                        });
+                    });
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                alert("Error fetching PRs.");
+            });
+    });
+</script>
+</body>
+</html>
