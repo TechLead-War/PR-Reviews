@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/gorilla/mux"
@@ -73,12 +74,13 @@ func getPullsHandler(githubToken string) http.HandlerFunc {
 			http.Error(w, `{"message": "Owner and Repository are required!"}`, http.StatusBadRequest)
 			return
 		}
-		// Call GitHub API for PRs.
-		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
-		req, _ := http.NewRequest("GET", url, nil)
+		urlStr := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+		log.Printf("Fetching all PRs from: %s", urlStr)
+		req, _ := http.NewRequest("GET", urlStr, nil)
 		req.Header.Set("Authorization", "Bearer "+githubToken)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
+			log.Printf("Error fetching PRs: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -86,34 +88,19 @@ func getPullsHandler(githubToken string) http.HandlerFunc {
 
 		var prs []GitHubPR
 		if err = json.NewDecoder(resp.Body).Decode(&prs); err != nil {
+			log.Printf("Error decoding PRs: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if len(prs) == 0 {
+			log.Printf("No open PRs found for %s/%s", owner, repo)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"message": "No open PRs found for this repository."})
 			return
 		}
 
-		// If filtering for review requested, use the "reviewRequested" and "reviewer" query parameters.
-		reviewRequested := r.URL.Query().Get("reviewRequested")
-		reviewer := r.URL.Query().Get("reviewer")
-		var filteredPRs []GitHubPR
-		if reviewRequested == "true" && reviewer != "" {
-			for _, pr := range prs {
-				for _, reqReviewer := range pr.RequestedReviewers {
-					if reqReviewer.Login == reviewer {
-						filteredPRs = append(filteredPRs, pr)
-						break
-					}
-				}
-			}
-		} else {
-			filteredPRs = prs
-		}
-
 		var results []PullRequest
-		for _, pr := range filteredPRs {
+		for _, pr := range prs {
 			results = append(results, PullRequest{
 				ID:     pr.ID,
 				Number: pr.Number,
@@ -137,11 +124,13 @@ func getCommentsHandler(githubToken string) http.HandlerFunc {
 			http.Error(w, `{"message": "Owner and Repository are required!"}`, http.StatusBadRequest)
 			return
 		}
-		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s/comments", owner, repo, prNumber)
-		req, _ := http.NewRequest("GET", url, nil)
+		urlStr := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s/comments", owner, repo, prNumber)
+		log.Printf("Fetching comments from: %s", urlStr)
+		req, _ := http.NewRequest("GET", urlStr, nil)
 		req.Header.Set("Authorization", "Bearer "+githubToken)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
+			log.Printf("Error fetching comments: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -149,6 +138,7 @@ func getCommentsHandler(githubToken string) http.HandlerFunc {
 
 		var ghComments []GitHubComment
 		if err = json.NewDecoder(resp.Body).Decode(&ghComments); err != nil {
+			log.Printf("Error decoding comments: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -169,6 +159,62 @@ func getCommentsHandler(githubToken string) http.HandlerFunc {
 	}
 }
 
+// New endpoint: get pull requests where the given reviewer is requested.
+func getMyReviewRequestsHandler(githubToken string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		owner := r.URL.Query().Get("owner")
+		repo := r.URL.Query().Get("repo")
+		reviewer := r.URL.Query().Get("reviewer")
+		if owner == "" || repo == "" || reviewer == "" {
+			http.Error(w, `{"message": "Owner, Repository, and Reviewer are required!"}`, http.StatusBadRequest)
+			return
+		}
+		log.Printf("Fetching review requests for %s/%s with reviewer %s", owner, repo, reviewer)
+		q := fmt.Sprintf("repo:%s/%s is:pr is:open review-requested:%s", owner, repo, reviewer)
+		searchURL := fmt.Sprintf("https://api.github.com/search/issues?q=%s", url.QueryEscape(q))
+		log.Printf("Search URL: %s", searchURL)
+		req, _ := http.NewRequest("GET", searchURL, nil)
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("Error in review request search: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		var result struct {
+			Items []struct {
+				ID      int        `json:"id"`
+				Number  int        `json:"number"`
+				Title   string     `json:"title"`
+				State   string     `json:"state"`
+				HTMLURL string     `json:"html_url"`
+				User    GitHubUser `json:"user"`
+			} `json:"items"`
+		}
+		if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			log.Printf("Error decoding search response: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("Found %d review-requested PRs", len(result.Items))
+		var prs []PullRequest
+		for _, item := range result.Items {
+			prs = append(prs, PullRequest{
+				ID:     item.ID,
+				Number: item.Number,
+				Title:  item.Title,
+				Author: item.User.Login,
+				State:  item.State,
+				PRURL:  item.HTMLURL,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(prs)
+	}
+}
+
 func main() {
 	godotenv.Load()
 	port := os.Getenv("PORT")
@@ -186,6 +232,7 @@ func main() {
 	// API endpoints.
 	r.HandleFunc("/api/pulls", getPullsHandler(githubToken)).Methods("GET")
 	r.HandleFunc("/api/pulls/{prNumber}/comments", getCommentsHandler(githubToken)).Methods("GET")
+	r.HandleFunc("/api/my-review-requests", getMyReviewRequestsHandler(githubToken)).Methods("GET")
 
 	// Serve FE.html for all other routes.
 	r.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
