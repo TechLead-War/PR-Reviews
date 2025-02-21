@@ -47,73 +47,96 @@
     <form id="prForm">
         <input type="text" id="owner" placeholder="Owner" required value="julofinance">
         <input type="text" id="repo" placeholder="Repository" required>
-        <button type="submit">Fetch PRs</button>
+        <!-- Optional: specify your GitHub username for review filtering -->
+        <input type="text" id="reviewer" placeholder="Your GitHub Username" required value="yourUsername">
+        <button type="submit">Fetch All PRs</button>
     </form>
+    <button id="reviewRequestedBtn">Fetch My Review Requests</button>
     <div id="result"></div>
 </div>
 <script>
+    // Function to display PRs.
+    function displayPRs(data) {
+        const resultDiv = document.getElementById("result");
+        resultDiv.innerHTML = "";
+        if (data.message) {
+            resultDiv.innerHTML = `<p>${data.message}</p>`;
+        } else {
+            data.forEach(pr => {
+                const prDiv = document.createElement("div");
+                prDiv.className = "pull-request";
+                prDiv.innerHTML = `
+          <h3>#${pr.number}: ${pr.title}</h3>
+          <p>Author: ${pr.author} | State: ${pr.state}</p>
+          <a href="${pr.pr_url}" target="_blank">View PR</a>
+          <br>
+          <button class="commentsBtn" data-pr="${pr.number}">Show Comments</button>
+          <div class="comments" id="comments-${pr.number}"></div>
+        `;
+                resultDiv.appendChild(prDiv);
+            });
+            // Attach click listeners for comments buttons.
+            document.querySelectorAll(".commentsBtn").forEach(btn => {
+                btn.addEventListener("click", function() {
+                    const prNumber = this.getAttribute("data-pr");
+                    const commentsDiv = document.getElementById("comments-" + prNumber);
+                    // Toggle display if already loaded.
+                    if (commentsDiv.innerHTML) {
+                        commentsDiv.innerHTML = "";
+                        return;
+                    }
+                    const owner = document.getElementById("owner").value.trim();
+                    const repo = document.getElementById("repo").value.trim();
+                    fetch(`/api/pulls/${prNumber}/comments?owner=${owner}&repo=${repo}`)
+                        .then(resp => resp.json())
+                        .then(comments => {
+                            if (comments.message) {
+                                commentsDiv.innerHTML = `<p>${comments.message}</p>`;
+                            } else {
+                                commentsDiv.innerHTML = comments.map(comment => `
+                  <div class="comment">
+                    <p><strong>${comment.author}</strong> commented:</p>
+                    <p>${comment.body}</p>
+                  </div>
+                `).join("");
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            alert("Error fetching comments.");
+                        });
+                });
+            });
+        }
+    }
+
+    // Fetch all PRs.
     document.getElementById("prForm").addEventListener("submit", function(e) {
         e.preventDefault();
         const owner = document.getElementById("owner").value.trim();
         const repo = document.getElementById("repo").value.trim();
-        if (!owner || !repo) return alert("Both fields are required.");
-
+        if (!owner || !repo) return alert("Owner and Repository are required.");
         fetch(`/api/pulls?owner=${owner}&repo=${repo}`)
             .then(response => response.json())
-            .then(data => {
-                const resultDiv = document.getElementById("result");
-                resultDiv.innerHTML = "";
-                if (data.message) {
-                    resultDiv.innerHTML = `<p>${data.message}</p>`;
-                } else {
-                    data.forEach(pr => {
-                        const prDiv = document.createElement("div");
-                        prDiv.className = "pull-request";
-                        prDiv.innerHTML = `
-              <h3>#${pr.number}: ${pr.title}</h3>
-              <p>Author: ${pr.author} | State: ${pr.state}</p>
-              <a href="${pr.pr_url}" target="_blank">View PR</a>
-              <br>
-              <button class="commentsBtn" data-pr="${pr.number}">Show Comments</button>
-              <div class="comments" id="comments-${pr.number}"></div>
-            `;
-                        resultDiv.appendChild(prDiv);
-                    });
-                    // add listeners for comments buttons
-                    document.querySelectorAll(".commentsBtn").forEach(btn => {
-                        btn.addEventListener("click", function() {
-                            const prNumber = this.getAttribute("data-pr");
-                            const commentsDiv = document.getElementById("comments-" + prNumber);
-                            // Toggle display if already loaded
-                            if (commentsDiv.innerHTML) {
-                                commentsDiv.innerHTML = "";
-                                return;
-                            }
-                            fetch(`/api/pulls/${prNumber}/comments?owner=${owner}&repo=${repo}`)
-                                .then(resp => resp.json())
-                                .then(comments => {
-                                    if (comments.message) {
-                                        commentsDiv.innerHTML = `<p>${comments.message}</p>`;
-                                    } else {
-                                        commentsDiv.innerHTML = comments.map(comment => `
-                      <div class="comment">
-                        <p><strong>${comment.author}</strong> commented:</p>
-                        <p>${comment.body}</p>
-                      </div>
-                    `).join("");
-                                    }
-                                })
-                                .catch(err => {
-                                    console.error(err);
-                                    alert("Error fetching comments.");
-                                });
-                        });
-                    });
-                }
-            })
+            .then(displayPRs)
             .catch(err => {
                 console.error(err);
                 alert("Error fetching PRs.");
+            });
+    });
+
+    // Fetch only PRs with my review requested.
+    document.getElementById("reviewRequestedBtn").addEventListener("click", function() {
+        const owner = document.getElementById("owner").value.trim();
+        const repo = document.getElementById("repo").value.trim();
+        const reviewer = document.getElementById("reviewer").value.trim();
+        if (!owner || !repo || !reviewer) return alert("Owner, Repository, and Your Username are required.");
+        fetch(`/api/pulls?owner=${owner}&repo=${repo}&reviewRequested=true&reviewer=${reviewer}`)
+            .then(response => response.json())
+            .then(displayPRs)
+            .catch(err => {
+                console.error(err);
+                alert("Error fetching review-requested PRs.");
             });
     });
 </script>

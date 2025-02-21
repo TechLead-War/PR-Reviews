@@ -16,12 +16,13 @@ type GitHubUser struct {
 }
 
 type GitHubPR struct {
-	ID      int        `json:"id"`
-	Number  int        `json:"number"`
-	Title   string     `json:"title"`
-	State   string     `json:"state"`
-	HTMLURL string     `json:"html_url"`
-	User    GitHubUser `json:"user"`
+	ID                 int          `json:"id"`
+	Number             int          `json:"number"`
+	Title              string       `json:"title"`
+	State              string       `json:"state"`
+	HTMLURL            string       `json:"html_url"`
+	User               GitHubUser   `json:"user"`
+	RequestedReviewers []GitHubUser `json:"requested_reviewers"`
 }
 
 type PullRequest struct {
@@ -53,6 +54,7 @@ type Comment struct {
 
 func enableCors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow all origins; adjust if needed.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -71,6 +73,7 @@ func getPullsHandler(githubToken string) http.HandlerFunc {
 			http.Error(w, `{"message": "Owner and Repository are required!"}`, http.StatusBadRequest)
 			return
 		}
+		// Call GitHub API for PRs.
 		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
 		req, _ := http.NewRequest("GET", url, nil)
 		req.Header.Set("Authorization", "Bearer "+githubToken)
@@ -92,8 +95,25 @@ func getPullsHandler(githubToken string) http.HandlerFunc {
 			return
 		}
 
+		// If filtering for review requested, use the "reviewRequested" and "reviewer" query parameters.
+		reviewRequested := r.URL.Query().Get("reviewRequested")
+		reviewer := r.URL.Query().Get("reviewer")
+		var filteredPRs []GitHubPR
+		if reviewRequested == "true" && reviewer != "" {
+			for _, pr := range prs {
+				for _, reqReviewer := range pr.RequestedReviewers {
+					if reqReviewer.Login == reviewer {
+						filteredPRs = append(filteredPRs, pr)
+						break
+					}
+				}
+			}
+		} else {
+			filteredPRs = prs
+		}
+
 		var results []PullRequest
-		for _, pr := range prs {
+		for _, pr := range filteredPRs {
 			results = append(results, PullRequest{
 				ID:     pr.ID,
 				Number: pr.Number,
@@ -163,11 +183,11 @@ func main() {
 	r := mux.NewRouter()
 	r.Use(enableCors)
 
-	// API endpoints
+	// API endpoints.
 	r.HandleFunc("/api/pulls", getPullsHandler(githubToken)).Methods("GET")
 	r.HandleFunc("/api/pulls/{prNumber}/comments", getCommentsHandler(githubToken)).Methods("GET")
 
-	// Serve FE.html for all other routes
+	// Serve FE.html for all other routes.
 	r.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "FE.html")
 	})
